@@ -1,0 +1,30 @@
+# ============================================================
+# Render Blueprint — Infrastructure as Code
+# ============================================================
+# This file tells Render how to deploy the app.
+# Commit this to your repo root, then:
+#   Dashboard → Blueprints → New Blueprint Instance → select repo
+# ============================================================
+
+databases:
+  - name: login-portal-db
+    plan: free
+    databaseName: login_portal
+    user: login_portal_user
+
+services:
+  - type: web
+    name: login-portal
+    runtime: node
+    plan: free
+    buildCommand: cd frontend && npm install && npm run build && cd ../backend && npm install
+    startCommand: cd backend && node server.js
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: JWT_SECRET
+        generateValue: true        # Render auto-generates a random secret
+      - key: DATABASE_URL
+        fromDatabase:
+          name: login-portal-db
+          property: connectionString

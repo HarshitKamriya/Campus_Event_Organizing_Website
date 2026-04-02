@@ -2,12 +2,9 @@
 -- NIT Srinagar Campus Event Portal — Database Schema
 -- ============================================================
 
--- Enable UUID generation
-CREATE EXTENSION IF NOT EXISTS "uuid-ossp";
-
 -- Users table (with role for admin/user distinction)
 CREATE TABLE IF NOT EXISTS users (
-    id            UUID          PRIMARY KEY DEFAULT uuid_generate_v4(),
+    id            UUID          PRIMARY KEY DEFAULT gen_random_uuid(),
     username      VARCHAR(50)   NOT NULL UNIQUE,
     email         VARCHAR(255)  NOT NULL UNIQUE,
     password_hash VARCHAR(255)  NOT NULL,
@@ -17,7 +14,7 @@ CREATE TABLE IF NOT EXISTS users (
 
 -- Events table
 CREATE TABLE IF NOT EXISTS events (
-    id            UUID          PRIMARY KEY DEFAULT uuid_generate_v4(),
+    id            UUID          PRIMARY KEY DEFAULT gen_random_uuid(),
     title         VARCHAR(200)  NOT NULL,
     description   TEXT          NOT NULL,
     event_date    TIMESTAMPTZ   NOT NULL,

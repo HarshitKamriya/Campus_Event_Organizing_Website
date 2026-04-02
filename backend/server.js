@@ -4,8 +4,8 @@
 
 const express = require("express");
 const cors = require("cors");
-const fs = require("fs");
 const path = require("path");
+const bcrypt = require("bcryptjs");
 require("dotenv").config();
 
 const pool = require("./config/db");
@@ -20,8 +20,6 @@ const isProduction = process.env.NODE_ENV === "production";
 // ── Middleware ──────────────────────────────────────────────
 app.use(express.json({ limit: "10kb" }));
 
-// CORS: in production the frontend is served from the same origin,
-// so we only need CORS for local dev (Vite on port 5173).
 app.use(
   cors({
     origin: isProduction ? false : "http://localhost:5173",
@@ -45,47 +43,73 @@ app.get("/api/health", (req, res) => {
 });
 
 // ── Serve React frontend in production ─────────────────────
-// After `npm run build` in /frontend, the built files live in
-// frontend/dist/. Express serves them as static assets, and
-// the catch-all route returns index.html so React Router can
-// handle client-side navigation (e.g. /dashboard, /register).
 if (isProduction) {
   const frontendPath = path.join(__dirname, "..", "frontend", "dist");
   app.use(express.static(frontendPath));
 
-  // Catch-all: any route not matched by API → serve React app
   app.get("*", (req, res) => {
     res.sendFile(path.join(frontendPath, "index.html"));
   });
 }
 
-// ── Auto-create tables & seed dummy data on startup ────────
+// ── Database initialization ────────────────────────────────
+// Run each SQL statement individually for reliability.
+// pool.query() with multiple statements can fail on some hosts.
 async function initDB() {
   try {
-    const schemaPath = path.join(__dirname, "schema.sql");
-    const schema = fs.readFileSync(schemaPath, "utf-8");
-    await pool.query(schema);
-    console.log("✅ Database schema initialized");
+    // 1. Create users table
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS users (
+        id            UUID          PRIMARY KEY DEFAULT gen_random_uuid(),
+        username      VARCHAR(50)   NOT NULL UNIQUE,
+        email         VARCHAR(255)  NOT NULL UNIQUE,
+        password_hash VARCHAR(255)  NOT NULL,
+        role          VARCHAR(10)   NOT NULL DEFAULT 'user',
+        created_at    TIMESTAMPTZ   NOT NULL DEFAULT NOW()
+      )
+    `);
+    console.log("✅ Users table ready");
 
-    // Migration: add 'role' column if it doesn't exist
-    // (needed when the users table was created before we added roles)
+    // 2. Add 'role' column if missing (migration for old tables)
     const colCheck = await pool.query(
       `SELECT 1 FROM information_schema.columns
        WHERE table_name = 'users' AND column_name = 'role'`
     );
     if (colCheck.rows.length === 0) {
-      await pool.query(
-        `ALTER TABLE users ADD COLUMN role VARCHAR(10) NOT NULL DEFAULT 'user'`
-      );
-      console.log("✅ Added 'role' column to existing users table");
+      await pool.query(`ALTER TABLE users ADD COLUMN role VARCHAR(10) NOT NULL DEFAULT 'user'`);
+      console.log("✅ Added 'role' column to users table");
     }
 
-    // Create default admin account if no admin exists
-    const adminCheck = await pool.query(
-      "SELECT 1 FROM users WHERE role = 'admin'"
-    );
+    // 3. Fix UUID default if table was created with old uuid_generate_v4()
+    await pool.query(`ALTER TABLE users ALTER COLUMN id SET DEFAULT gen_random_uuid()`);
+
+    // 4. Create events table
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS events (
+        id            UUID          PRIMARY KEY DEFAULT gen_random_uuid(),
+        title         VARCHAR(200)  NOT NULL,
+        description   TEXT          NOT NULL,
+        event_date    TIMESTAMPTZ   NOT NULL,
+        location      VARCHAR(200)  NOT NULL,
+        category      VARCHAR(50)   NOT NULL DEFAULT 'General',
+        created_by    UUID          REFERENCES users(id) ON DELETE SET NULL,
+        created_at    TIMESTAMPTZ   NOT NULL DEFAULT NOW()
+      )
+    `);
+    console.log("✅ Events table ready");
+
+    // 5. Fix UUID default on events table too
+    await pool.query(`ALTER TABLE events ALTER COLUMN id SET DEFAULT gen_random_uuid()`);
+
+    // 6. Create indexes
+    await pool.query(`CREATE INDEX IF NOT EXISTS idx_users_email ON users (email)`);
+    await pool.query(`CREATE INDEX IF NOT EXISTS idx_events_date ON events (event_date)`);
+    await pool.query(`CREATE INDEX IF NOT EXISTS idx_events_category ON events (category)`);
+    console.log("✅ Indexes ready");
+
+    // 7. Create default admin account if none exists
+    const adminCheck = await pool.query("SELECT 1 FROM users WHERE role = 'admin'");
     if (adminCheck.rows.length === 0) {
-      const bcrypt = require("bcryptjs");
       const adminHash = await bcrypt.hash("admin123", 10);
       await pool.query(
         `INSERT INTO users (username, email, password_hash, role)
@@ -93,71 +117,33 @@ async function initDB() {
          ON CONFLICT (email) DO UPDATE SET role = 'admin'`,
         ["admin", "admin@nitsri.ac.in", adminHash]
       );
-      console.log("👑 Default admin account created:");
-      console.log("   Email:    admin@nitsri.ac.in");
-      console.log("   Password: admin123");
+      console.log("👑 Default admin created: admin@nitsri.ac.in / admin123");
     }
 
-    // Seed dummy events if table is empty
+    // 8. Seed dummy events if table is empty
     const { rows } = await pool.query("SELECT COUNT(*) FROM events");
     if (parseInt(rows[0].count) === 0) {
-      const dummyEvents = [
-        {
-          title: "TechFest 2026 — Hackathon",
-          description: "A 24-hour national-level hackathon open to all engineering students. Build innovative solutions to real-world problems. Top 3 teams win cash prizes up to ₹50,000. Mentors from Google, Microsoft, and Amazon will be available throughout the event. Meals and refreshments provided.",
-          event_date: "2026-04-10T09:00:00",
-          location: "Computer Science Block, Main Campus",
-          category: "Tech",
-        },
-        {
-          title: "Rang-e-Kashmir — Annual Cultural Fest",
-          description: "Celebrate the vibrant culture of Kashmir and India! Featuring live music performances, traditional dance competitions, poetry recitals, and an art exhibition. Open to all students and faculty. Food stalls with authentic Kashmiri cuisine including Rogan Josh and Dum Aloo.",
-          event_date: "2026-04-15T16:00:00",
-          location: "Open Air Theatre",
-          category: "Cultural",
-        },
-        {
-          title: "Inter-Department Cricket Tournament",
-          description: "The annual T20 cricket tournament between all departments kicks off! Register your department team (minimum 11 players). Matches held daily from 3 PM onwards. Semifinal and Final on the last two days. Trophy and medals for the winning team.",
-          event_date: "2026-04-12T15:00:00",
-          location: "NIT Srinagar Cricket Ground",
-          category: "Sports",
-        },
-        {
-          title: "AI & Machine Learning Workshop",
-          description: "Hands-on 2-day workshop covering fundamentals of AI/ML using Python, TensorFlow, and scikit-learn. Build your first neural network from scratch. No prior ML experience required — basic Python knowledge is sufficient. Certificates provided to all participants.",
-          event_date: "2026-04-18T10:00:00",
-          location: "Seminar Hall, IT Block",
-          category: "Workshop",
-        },
-        {
-          title: "Guest Lecture: Future of Quantum Computing",
-          description: "Prof. Anil Sharma from IIT Delhi presents on the latest breakthroughs in quantum computing and its implications for cryptography, drug discovery, and optimization problems. Interactive Q&A session follows. All faculty and students are encouraged to attend.",
-          event_date: "2026-04-20T14:00:00",
-          location: "Auditorium, Main Building",
-          category: "Seminar",
-        },
-        {
-          title: "Campus Clean-Up Drive & Tree Plantation",
-          description: "Join the NSS unit for a campus-wide clean-up and tree plantation drive. Help make our campus greener and cleaner! Saplings and equipment will be provided. Participation certificates and community service hours awarded to all volunteers.",
-          event_date: "2026-04-08T08:00:00",
-          location: "Assembly Point: Main Gate",
-          category: "General",
-        },
+      const events = [
+        ["TechFest 2026 — Hackathon", "A 24-hour national-level hackathon. Top 3 teams win cash prizes up to ₹50,000. Mentors from Google, Microsoft, and Amazon. Meals provided.", "2026-04-10T09:00:00", "Computer Science Block, Main Campus", "Tech"],
+        ["Rang-e-Kashmir — Annual Cultural Fest", "Live music, traditional dance competitions, poetry recitals, art exhibition. Food stalls with authentic Kashmiri cuisine.", "2026-04-15T16:00:00", "Open Air Theatre", "Cultural"],
+        ["Inter-Department Cricket Tournament", "Annual T20 cricket tournament between all departments. Register your team (min 11 players). Trophy and medals for winners.", "2026-04-12T15:00:00", "NIT Srinagar Cricket Ground", "Sports"],
+        ["AI & Machine Learning Workshop", "2-day hands-on workshop: Python, TensorFlow, scikit-learn. Build your first neural network. Certificates provided.", "2026-04-18T10:00:00", "Seminar Hall, IT Block", "Workshop"],
+        ["Guest Lecture: Future of Quantum Computing", "Prof. Anil Sharma from IIT Delhi on quantum computing breakthroughs. Interactive Q&A session follows.", "2026-04-20T14:00:00", "Auditorium, Main Building", "Seminar"],
+        ["Campus Clean-Up Drive & Tree Plantation", "NSS campus-wide clean-up and tree plantation. Saplings provided. Participation certificates awarded.", "2026-04-08T08:00:00", "Assembly Point: Main Gate", "General"],
       ];
-
-      for (const ev of dummyEvents) {
+      for (const [title, desc, date, loc, cat] of events) {
         await pool.query(
-          `INSERT INTO events (title, description, event_date, location, category)
-           VALUES ($1, $2, $3, $4, $5)`,
-          [ev.title, ev.description, ev.event_date, ev.location, ev.category]
+          `INSERT INTO events (title, description, event_date, location, category) VALUES ($1,$2,$3,$4,$5)`,
+          [title, desc, date, loc, cat]
         );
       }
-      console.log("🌱 Seeded 6 dummy events into database");
+      console.log("🌱 Seeded 6 dummy events");
     }
+
+    console.log("🚀 Database fully initialized!");
   } catch (err) {
-    console.error("⚠️  Database init error:", err.message);
-    console.error("   Make sure PostgreSQL is running and credentials are correct.");
+    console.error("❌ DATABASE INIT ERROR:", err.message);
+    console.error("Full error:", err);
   }
 }
 

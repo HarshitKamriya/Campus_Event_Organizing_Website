@@ -1,3 +1,8 @@
+# Live Demo : https://campus-event-organizing-website.onrender.com/login
+ # for admin use:
+     email : admin@nitsri.ac.in
+     password : admin123
+
 # Login Feature Portal
 
 A full-stack web application with user authentication built using React, Node.js/Express, PostgreSQL, and JWT.
